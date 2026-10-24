@@ -21,6 +21,8 @@ Options:
     --conditions none paper_peer    only these conditions (names below)
     --include-optional    also run the optional conditions (or name any with --conditions)
     --max-rounds 15       passed to every game (default: no limit, as the game's default)
+    --warn B              tell the ordinary players someone may be undercover (A, B or C;
+                          prompts/undercover/warnings/); applies to every game in the batch
     --timeout 45          stop a game that runs longer than this many minutes (default 45)
     --dry-run             just print the commands
 Press Ctrl+C to stop the batch; games still running are stopped, and are not usable.
@@ -79,6 +81,7 @@ def main():
     ap.add_argument("--conditions", nargs="+", choices=list(CONDITIONS))
     ap.add_argument("--include-optional", action="store_true")
     ap.add_argument("--max-rounds", type=int, default=0)
+    ap.add_argument("--warn", default="none", choices=["none", "A", "B", "C"])
     ap.add_argument("--timeout", type=float, default=45, help="minutes per game")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--game-script", default="src/game/game_undercover.py", help=argparse.SUPPRESS)
@@ -97,10 +100,13 @@ def main():
         cmd = [sys.executable, args.game_script, "--luke", "llm"] + CONDITIONS[name][0]
         if args.max_rounds:
             cmd += ["--max-rounds", str(args.max_rounds)]
+        if args.warn != "none":
+            cmd += ["--warn", args.warn]
         return cmd
 
     print(f"Batch {stamp}: {len(queue)} games, {args.parallel} at a time, "
-          f"{args.stagger:g}s apart. Conditions: {', '.join(names)}")
+          f"{args.stagger:g}s apart. Conditions: {', '.join(names)}"
+          + (f". Warning level {args.warn}" if args.warn != "none" else ""))
     if args.dry_run:
         for i, n in enumerate(queue, 1):
             print(f"  {i:>2}. {' '.join(command(n))}")

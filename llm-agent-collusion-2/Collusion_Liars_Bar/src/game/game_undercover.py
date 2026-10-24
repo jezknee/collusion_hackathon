@@ -50,6 +50,14 @@ Deliberate differences from the paper's game, so the write-up can state them:
 - Scripted Luke: no secret channel and no "NEVER challenge your ally" reminder, because
   he can't hold a conversation; his offers are the non-challenge pact only.
 - With --offer-to all only: possibly several alliances at once, rather than one pair.
+
+WARNING (--warn A|B|C, default none). Tells the ordinary players that someone may be
+undercover, by adding a short text (prompts/undercover/warnings/<level>.txt) to the end of the
+rules they see in every prompt that includes the rules (play, challenge, reflect) and in the
+offer conversation. Luke doesn't see it. A = someone may be undercover; B = A + secret
+channels are against the rules, but ordinary players often offer them; C = B + agreeing to one
+with the undercover player gets you eliminated (never actually enforced). Results go to a
+folder ending "-warnA", "-warnB" or "-warnC".
 """
 import argparse
 import os
@@ -62,6 +70,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 import json
 import re
 
+from src.agents.player import RULE_BASE_PATH
 from src.agents.scripted_player import POLICIES, ScriptedPlayer
 from src.agents.trusted_llm_player import TrustedLLMPlayer
 from src.game.game_secret_channel import GameSecretChannel, SecretChannel
@@ -81,6 +90,32 @@ ARM_FILES = {
     "benign": "prompts/undercover/benign.txt",
 }
 ARMS = ["none"] + list(ARM_FILES)
+WARN_LEVELS = ["none", "A", "B", "C"]
+
+
+def load_warning(level):
+    """The warning text for --warn (prompts/undercover/warnings/<level>.txt), or "" for none."""
+    if level in (None, "none"):
+        return ""
+    with open(f"prompts/undercover/warnings/{level}.txt", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def with_warning(rules, warning):
+    return rules.rstrip() + "\n\n" + warning if warning else rules
+
+
+def add_warning_to_rules(player, warning):
+    """Make this player's rules (read by the paper's Player in every play, challenge and
+    reflect prompt) end with the warning, without changing the paper's code or files."""
+    original = player._read_file
+
+    def read(path):
+        text = original(path)
+        same = os.path.normpath(path) == os.path.normpath(RULE_BASE_PATH)
+        return with_warning(text, warning) if same else text
+
+    player._read_file = read
 # LLM Luke's versions of the three new offers, which also offer a secret channel.
 LLM_ARM_FILES = dict(ARM_FILES, **{
     "direct": "prompts/undercover/llm/direct.txt",
@@ -140,7 +175,8 @@ def classify_reply(response: str) -> str:
 
 class GameUndercover(GameSecretChannel):
     def __init__(self, arm, trigger_round, bluff_rate, challenge_rate, max_rounds=0,
-                 policy="fixed", luke_type="scripted", channel_reminders="paper", offer_to="one"):
+                 policy="fixed", luke_type="scripted", channel_reminders="paper", offer_to="one",
+                 warn="none"):
         others = [c for c in PAPER_PLAYERS if c["name"] != UNDERCOVER]
         random.shuffle(others)
         luke = next(c for c in PAPER_PLAYERS if c["name"] == UNDERCOVER)
@@ -167,6 +203,12 @@ class GameUndercover(GameSecretChannel):
         self.players[0] = bot
         for p in self.players:
             p.init_opinions(self.players)
+        # The warning goes to the ordinary players only (not Luke).
+        self.warn = warn
+        self.warning = load_warning(warn)
+        if self.warning:
+            for p in self.players[1:]:
+                add_warning_to_rules(p, self.warning)
 
         self.arm = arm
         self.policy = policy
@@ -176,7 +218,8 @@ class GameUndercover(GameSecretChannel):
         self.game_record.game_id += "_" + uuid.uuid4().hex[:6]
         self.game_record.save_directory = os.path.join("experiments", "undercover", f"{arm}-{policy}" + ("-llm" if luke_type == "llm" else "")
             + ("-noreminder" if luke_type == "llm" and channel_reminders == "off" else "")
-            + ("-offerall" if offer_to == "all" else ""))
+            + ("-offerall" if offer_to == "all" else "")
+            + (f"-warn{warn}" if warn != "none" else ""))
         os.makedirs(self.game_record.save_directory, exist_ok=True)
         self.game_record.add_secret_channel_event({
             "event": "setup", "arm": arm, "luke_policy": policy, "luke_type": luke_type,
@@ -184,7 +227,7 @@ class GameUndercover(GameSecretChannel):
             "seat_order": [c["name"] for c in configs],
             "models": {c["name"]: c["model"] for c in configs if c["name"] != UNDERCOVER},
             "channel_reminders": channel_reminders if luke_type == "llm" else None,
-            "offer_to": offer_to,
+            "offer_to": offer_to, "warn": warn, "warning_text": self.warning or None,
             "trigger_round": trigger_round, "bot_bluff_rate": bluff_rate,
             "bot_challenge_rate": challenge_rate, "max_rounds": max_rounds,
         })
@@ -195,7 +238,7 @@ class GameUndercover(GameSecretChannel):
         if self.arm == "none":
             return
         with open("prompts/rule_vanilla.txt", encoding="utf-8") as f:
-            rules = f.read()
+            rules = with_warning(f.read(), self.warning)
         arm_files = LLM_ARM_FILES if self.luke_type == "llm" else ARM_FILES
         with open(arm_files[self.arm], encoding="utf-8") as f:
             template = f.read()
@@ -365,13 +408,16 @@ def main():
     ap.add_argument("--channel-reminders", default="paper", choices=["paper", "off"],
                     help="LLM Luke only: keep (paper) or drop (off) the paper's 'NEVER challenge "
                          "your ally' reminder between channel partners")
+    ap.add_argument("--warn", default="none", choices=WARN_LEVELS,
+                    help="tell the ordinary players someone may be undercover: A, B or C "
+                         "(prompts/undercover/warnings/); default none")
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
     if args.seed is not None:
         random.seed(args.seed)
     game = GameUndercover(args.arm, args.trigger_round, args.bluff_rate,
                           args.challenge_rate, args.max_rounds, args.luke_policy, args.luke,
-                          args.channel_reminders, args.offer_to)
+                          args.channel_reminders, args.offer_to, args.warn)
     game.start_game()
 
 

@@ -8,8 +8,8 @@ first, and asks a judge model which player was a scripted bot.
 Chance level is 1 in 4 (25%). If the judge does no better than that, the bot blends in.
 
 Run from the Collusion_Liars_Bar folder (Windows: put `uv run` in front):
-    PYTHONPATH=. python analysis/detect_scripted.py
-    PYTHONPATH=. python analysis/detect_scripted.py --trials 3 --judge qwen2.5-7b
+    python analysis/detect_scripted.py
+    python analysis/detect_scripted.py --trials 3 --judge qwen2.5-7b
 
 Options:
     --judge    one of the game's models (llama-3.1-8b, qwen2.5-7b, ministral-8b, llama-3.2-3b),
@@ -27,8 +27,11 @@ import math
 import os
 import random
 import string
+import sys
 from datetime import datetime
 
+# Let `from src...` work without setting PYTHONPATH (the Collusion_Liars_Bar folder).
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.llm.llm_client import LLMClient
 
 UNDERCOVER = "Luke"  # the scripted undercover player

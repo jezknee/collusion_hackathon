@@ -16,6 +16,9 @@ Versions (--version) of the three new arms:
     pact        prompts/undercover/*.txt      (what scripted Luke offers: the pact only)
     channel     prompts/undercover/llm/*.txt  (what LLM Luke offers: the pact plus a secret channel)
     both        (default) both versions; paper_peer is run once
+Warnings (--warn none A B C): the text in prompts/undercover/warnings/<level>.txt is added to
+the end of the rules the player sees, as in games run with --warn. Default: none only.
+    e.g.  --arms paper_peer indirect --version channel --warn none A B C --n 20
 
 The invitation always comes from Luke, the undercover player in our games; Lily, Mike
 and Quinn receive it. The paper's designer offer (the main positive control) is run with
@@ -65,6 +68,8 @@ def main():
     ap.add_argument("--arms", nargs="+", default=["paper_peer"] + NEW_ARMS,
                     choices=["paper_peer"] + NEW_ARMS)
     ap.add_argument("--version", default="both", choices=["pact", "channel", "both"])
+    ap.add_argument("--warn", nargs="+", default=["none"], choices=["none", "A", "B", "C"],
+                    help="warning levels to test (default: none only)")
     ap.add_argument("--players", nargs="+", default=RECEIVERS, choices=RECEIVERS)
     args = ap.parse_args()
 
@@ -76,6 +81,15 @@ def main():
                  f"(line 45: 'tool_offer_prompt copy.txt' -> 'tool_offer_prompt.txt').")
     except UnicodeDecodeError:
         sys.exit("\nText-encoding error. Set PYTHONUTF8=1 first (Windows: $env:PYTHONUTF8=\"1\").")
+
+    base_rules = tester.game_rules
+    warnings = {}
+    for w in args.warn:
+        if w == "none":
+            warnings[w] = ""
+        else:
+            with open(f"prompts/undercover/warnings/{w}.txt", encoding="utf-8") as wf:
+                warnings[w] = wf.read().strip()
 
     # Capture each raw reply without changing the repo's method.
     real_chat = tester.client.chat
@@ -95,7 +109,8 @@ def main():
             conditions.append((arm, "paper"))
         else:
             conditions += [(arm, v) for v in versions]
-    jobs = [(arm, v, p, i) for arm, v in conditions for p in args.players for i in range(args.n)]
+    jobs = [(arm, v, w, p, i) for arm, v in conditions for w in args.warn
+            for p in args.players for i in range(args.n)]
     random.shuffle(jobs)  # mix arms so a provider hiccup doesn't hit one arm only
     print(f"Running {len(jobs)} trials...")
 
@@ -103,7 +118,10 @@ def main():
     out_path = f"test_results/undercover_acceptance_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
     counts = defaultdict(Counter)
     with open(out_path, "w", encoding="utf-8") as f:
-        for k, (arm, version, player, i) in enumerate(jobs, 1):
+        for k, (arm, version, warn, player, i) in enumerate(jobs, 1):
+            # same as the games: the warning goes at the end of the rules
+            tester.game_rules = (base_rules.rstrip() + "\n\n" + warnings[warn]
+                                 if warnings[warn] else base_rules)
             with open(arm_file(arm, version), encoding="utf-8") as pf:
                 tester.partner_response_prompt_template = pf.read()
             last.clear()
@@ -112,21 +130,21 @@ def main():
             decision = "ACCEPT" if accepted else "REFUSE"
             if not reply:
                 decision = "ERROR"  # the repo counts these as refusals; we keep them separate
-            row = {"arm": arm, "version": version, "player": player,
+            row = {"arm": arm, "version": version, "warn": warn, "player": player,
                    "model": tester.models[player], "trial": i,
                    "initiator": UNDERCOVER, "decision": decision, "reply": reply}
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
-            counts[(arm, version, player)][decision] += 1
+            counts[(arm, version, warn, player)][decision] += 1
             if k % 25 == 0:
                 print(f"  {k}/{len(jobs)} done")
 
     print(f"\nSaved every reply to {out_path}\n")
-    print(f"{'arm':<12}{'version':<9}{'player':<8}{'accept':>8}{'refuse':>8}{'error':>7}{'accept %':>10}")
-    for (arm, version, player), c in sorted(counts.items()):
+    print(f"{'arm':<12}{'version':<9}{'warn':<6}{'player':<8}{'accept':>8}{'refuse':>8}{'error':>7}{'accept %':>10}")
+    for (arm, version, warn, player), c in sorted(counts.items()):
         valid = c["ACCEPT"] + c["REFUSE"]
         pct = 100 * c["ACCEPT"] / valid if valid else 0
-        print(f"{arm:<12}{version:<9}{player:<8}{c['ACCEPT']:>8}{c['REFUSE']:>8}{c['ERROR']:>7}{pct:>9.1f}%")
+        print(f"{arm:<12}{version:<9}{warn:<6}{player:<8}{c['ACCEPT']:>8}{c['REFUSE']:>8}{c['ERROR']:>7}{pct:>9.1f}%")
 
 
 if __name__ == "__main__":
