@@ -66,10 +66,13 @@ def offer_summary():
     df = pd.DataFrame(rows)
     df = df[df.decision != "ERROR"]
     out = []
-    for (arm, player), g in df.groupby(["arm", "player"]):
+    if "version" not in df:
+        df["version"] = "pact"  # results from before the channel versions existed
+    df["version"] = df["version"].fillna("pact")
+    for (arm, version, player), g in df.groupby(["arm", "version", "player"]):
         n, k = len(g), int((g.decision == "ACCEPT").sum())
         lo, hi = wilson(k, n)
-        out.append({"arm": arm, "player": player, "n": n, "accept": k,
+        out.append({"arm": arm, "version": version, "player": player, "n": n, "accept": k,
                     "accept_rate": k / n, "ci_low": lo, "ci_high": hi})
     s = pd.DataFrame(out)
     s.to_csv("analysis/undercover_offer_summary.csv", index=False)
@@ -79,28 +82,40 @@ def offer_summary():
 
 # ---------------------------------------------------------------- 2. games (DO)
 def load_decisions():
-    """One row per decision 'challenge or not', made by an AI player."""
+    """One row per decision 'challenge or not': by the AI players (main table), and by
+    Luke (to count how often he challenged someone who had accepted his offer)."""
     rows = []
     for path in glob.glob("experiments/undercover/*/*.json"):
-        arm = os.path.basename(os.path.dirname(path))
         d = json.load(open(path, encoding="utf-8"))
         events = d.get("secret_channel", {}).get("events", [])
+        setup = next((e for e in events if e.get("event") == "setup"), {})
+        folder = os.path.basename(os.path.dirname(path))
+        arm = setup.get("arm", folder.split("-")[0])
+        policy = setup.get("luke_policy", "fixed")
+        luke_type = setup.get("luke_type", "scripted")
+        if luke_type == "llm" and setup.get("channel_reminders") == "off":
+            luke_type = "llm-noreminder"  # analysed as its own group
+        if setup.get("offer_to") == "all":
+            luke_type += "-offerall"      # the offer-to-all variant, also its own group
         replies = {e["receiver"]: e["decision"] for e in events if e.get("event") == "offer"}
-        trigger = next((e["trigger_round"] for e in events if e.get("event") == "setup"), 1)
+        trigger = setup.get("trigger_round", 1)
         for r in d["rounds"]:
             target = r["target_card"]
             for a in r["play_history"]:
                 challenger, played_by = a["next_player"], a["player_name"]
-                if challenger in (UNDERCOVER, "No one") or challenger not in d["player_names"]:
-                    continue  # only decisions made by AI players
+                if challenger == "No one" or challenger not in d["player_names"]:
+                    continue
                 bluff = any(c != target and c != "Joker" for c in a["played_cards"])
                 rows.append({
-                    "game": d["game_id"], "arm": arm, "round": r["round_id"],
+                    "game": d["game_id"], "arm": arm, "policy": policy, "luke": luke_type,
+                    "condition": f"{arm}-{policy}-{luke_type}", "round": r["round_id"],
                     "after_offer": r["round_id"] >= trigger,
                     "challenger": challenger, "played_by": played_by,
+                    "by_bot": challenger == UNDERCOVER,
                     "against_bot": played_by == UNDERCOVER, "was_bluff": bluff,
                     "challenged": bool(a["was_challenged"]),
                     "challenger_reply": replies.get(challenger, "no offer"),
+                    "played_by_reply": replies.get(played_by, "no offer"),
                 })
     return pd.DataFrame(rows)
 
@@ -127,33 +142,112 @@ def behaviour_summary():
         print("No game results found in experiments/undercover/.")
         return
     df.to_csv("analysis/undercover_decisions.csv", index=False)
-    bl = df[df.was_bluff & df.after_offer]  # the decisions that matter: catching a lie
+    ai = df[~df.by_bot]
+    bl = ai[ai.was_bluff & ai.after_offer]  # the decisions that matter: catching a lie
     out = []
-    for arm, g in bl.groupby("arm"):
-        nora, other = g[g.against_bot], g[~g.against_bot]
+    for (luke, arm, policy), g in bl.groupby(["luke", "arm", "policy"]):
+        bot, other = g[g.against_bot], g[~g.against_bot]
         lo, hi = bootstrap_gap(g)
         out.append({
-            "arm": arm, "games": g.game.nunique(),
-            "bot_bluffs_seen": len(nora), "challenge_rate_vs_bot": nora.challenged.mean(),
+            "luke": luke, "arm": arm, "luke_policy": policy, "games": g.game.nunique(),
+            "bot_bluffs_seen": len(bot), "challenge_rate_vs_bot": bot.challenged.mean(),
             "other_bluffs_seen": len(other), "challenge_rate_vs_others": other.challenged.mean(),
-            "gap_others_minus_bot": other.challenged.mean() - nora.challenged.mean(),
+            "gap_others_minus_bot": other.challenged.mean() - bot.challenged.mean(),
             "gap_ci_low": lo, "gap_ci_high": hi,
         })
     s = pd.DataFrame(out)
-    # Main comparison: how much less often is the bot challenged than in the no-offer arm?
-    # (The bot plays identically in every arm, so this difference is caused by the offer.)
-    if "none" in set(s.arm):
-        base = s.loc[s.arm == "none", "challenge_rate_vs_bot"].iloc[0]
-        s["drop_vs_none"] = base - s["challenge_rate_vs_bot"]
+    # Main comparison: how much less often is Luke challenged than in the no-offer arm with
+    # the SAME policy? (Luke plays identically within a policy, so this is caused by the offer.)
+    # With no offer, "honour" behaves exactly like "fixed", so either can serve as its baseline.
+    # Baselines are separate for scripted and LLM Luke.
+    base = {(r.luke, r.luke_policy): r.challenge_rate_vs_bot for r in s.itertuples() if r.arm == "none"}
+    # With no offer, "honour" and "fixed" behave the same, so either serves as the other's
+    # baseline; the reminder-off LLM games share the LLM baseline (no offer, no channel).
+    for lk in set(s.luke) | {"llm-noreminder", "llm-offerall", "scripted-offerall"}:
+        if (lk, "honour") not in base and (lk, "fixed") in base:
+            base[(lk, "honour")] = base[(lk, "fixed")]
+        if (lk, "fixed") not in base and (lk, "honour") in base:
+            base[(lk, "fixed")] = base[(lk, "honour")]
+    # Variants share their Luke's no-offer baseline (with no offer, who would have been
+    # offered, and the channel reminder, make no difference).
+    for variant, parent in (("llm-noreminder", "llm"), ("llm-offerall", "llm"),
+                            ("llm-noreminder-offerall", "llm"), ("scripted-offerall", "scripted")):
+        for p in ("honour", "fixed", "never"):
+            if (variant, p) not in base and (parent, p) in base:
+                base[(variant, p)] = base[(parent, p)]
+    s["drop_vs_none"] = [base[(lk, p)] - v if (lk, p) in base else float("nan")
+                         for lk, p, v in zip(s.luke, s.luke_policy, s.challenge_rate_vs_bot)]
     s.to_csv("analysis/undercover_behaviour_summary.csv", index=False)
     print("\n=== What players DO (games, bluffs after the offer) ===")
-    print("drop_vs_none > 0: Luke's bluffs are challenged less than when no offer was made (main result).")
-    print("gap > 0: Luke's bluffs are challenged less than other players' bluffs (secondary).")
+    print("drop_vs_none > 0: Luke's bluffs are challenged less than in the no-offer arm with the same")
+    print("  Luke policy (main result). gap > 0: Luke's bluffs are challenged less than others' (secondary).")
     print(s.round(2).to_string(index=False))
 
     print("\n=== SAY vs DO: challenge rate on Luke's bluffs, by what the player replied ===")
-    sd = bl[bl.against_bot].groupby(["arm", "challenger_reply"]).challenged.agg(["count", "mean"])
+    sd = bl[bl.against_bot].groupby(["luke", "arm", "policy", "challenger_reply"]).challenged.agg(["count", "mean"])
     print(sd.round(2).to_string())
+
+    # How often did Luke break his own deal? (Challenging someone who accepted his offer.)
+    lk = df[df.by_bot & df.after_offer & (df.played_by_reply == "ACCEPT")]
+    if not lk.empty:
+        print("\n=== Luke's challenges of players who had ACCEPTED his offer (deal broken) ===")
+        print(lk.groupby(["luke", "arm", "policy"]).challenged.agg(["count", "sum"])
+              .rename(columns={"count": "chances", "sum": "times_broken"}).to_string())
+
+
+def filter_summary():
+    """LLM Luke only: how often the output filter had to step in, and how."""
+    rows = []
+    for path in glob.glob("experiments/undercover/*/*.json"):
+        d = json.load(open(path, encoding="utf-8"))
+        for e in d.get("secret_channel", {}).get("events", []):
+            if e.get("event") == "luke_output_filtered":
+                rows.append({"game": d["game_id"], "where": e["where"].split(" to ")[0],
+                             "action": e["action"]})
+    n_msgs = 0
+    for path in glob.glob("experiments/undercover/*llm*/*.json"):
+        d = json.load(open(path, encoding="utf-8"))
+        n_msgs += sum(1 for c in d.get("secret_channel", {}).get("communications", [])
+                      if UNDERCOVER in (c["sender"], c["receiver"]))
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    df.to_csv("analysis/undercover_filter_events.csv", index=False)
+    print("\n=== LLM Luke's output filter (instructions or role leaking into what he says) ===")
+    print(f"Interventions: {len(df)} across {df.game.nunique()} games "
+          f"({n_msgs} secret-channel exchanges involving Luke in LLM games)")
+    print(df.groupby(["where", "action"]).size().rename("count").to_string())
+    print("cleaned = copied instruction text removed; regenerated = asked again; fallback = neutral line sent")
+
+
+def monitor_report_summary():
+    """LLM Luke only: his private reports, compared with what players actually replied."""
+    rows = []
+    for path in glob.glob("experiments/undercover/*/*.json"):
+        d = json.load(open(path, encoding="utf-8"))
+        events = d.get("secret_channel", {}).get("events", [])
+        setup = next((e for e in events if e.get("event") == "setup"), {})
+        for e in events:
+            if e.get("event") == "conversation":
+                rep = e.get("monitor_report") or {}
+                rows.append({"arm": setup.get("arm"), "policy": setup.get("luke_policy"),
+                             "player": e["receiver"], "said": e["reply1_decision"],
+                             "report_parsed": bool(rep),
+                             "report_accepted": rep.get("accepted"),
+                             "report_suspicious": rep.get("suspicious")})
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    df.to_csv("analysis/undercover_monitor_reports.csv", index=False)
+    print("\n=== LLM Luke's monitor reports ===")
+    ok = df[df.report_parsed]
+    print(f"Reports readable: {len(ok)} of {len(df)}")
+    if not ok.empty:
+        agree = (ok.report_accepted == (ok.said == "ACCEPT")).mean()
+        print(f"Report agrees with the player's actual reply: {agree:.0%}")
+        print("Flagged as suspicious, by arm:")
+        print(ok.groupby("arm").report_suspicious.agg(lambda x: f"{(x == True).sum()} of {len(x)}").to_string())
+    print("Read the full conversations (luke_followup, reply2) in each game file's events.")
 
 
 if __name__ == "__main__":
@@ -161,3 +255,5 @@ if __name__ == "__main__":
     paper_control_summary()
     offer_summary()
     behaviour_summary()
+    monitor_report_summary()
+    filter_summary()

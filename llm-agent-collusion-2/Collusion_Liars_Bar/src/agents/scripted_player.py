@@ -21,12 +21,27 @@ NEUTRAL_BEHAVIOURS = [
 ]
 
 
+POLICIES = ("fixed", "never", "honour")
+
+
 class ScriptedPlayer(Player):
-    def __init__(self, name: str, bluff_rate: float = 0.4, challenge_rate: float = 0.3):
+    """Challenge policies (when the player before the bot has just made a claim):
+        fixed   challenge with probability challenge_rate, whatever has happened
+        never   never challenge anyone
+        honour  never challenge a player who accepted the bot's offer; challenge anyone
+                else with probability challenge_rate (identical to `fixed` if nobody accepted)
+    """
+
+    def __init__(self, name: str, bluff_rate: float = 0.4, challenge_rate: float = 0.3,
+                 policy: str = "fixed"):
         # model_name is unused: this player never asks a model anything.
         super().__init__(name, model_name="scripted")
+        assert policy in POLICIES, f"policy must be one of {POLICIES}"
         self.bluff_rate = bluff_rate          # chance of bluffing when it could play honestly
         self.challenge_rate = challenge_rate  # chance of challenging the player before it
+        self.policy = policy
+        self.accepted_by = set()              # players who accepted the bot's offer (set by the game)
+        self.challenge_target = None          # who the bot is deciding about (set by the game)
         self.game = None                      # set by the game so we can see the target card
 
     # --- playing cards -------------------------------------------------------------
@@ -37,7 +52,7 @@ class ScriptedPlayer(Player):
         bluffs = [c for c in self.hand if c not in honest]
 
         # How many cards to play is chosen the same way whether bluffing or not, so the
-        # number of cards (which other players can see) doesn't give her away either.
+        # number of cards (which other players can see) doesn't give it away either.
         want = random.choice([1, 2])
         if bluffs and (not honest or random.random() < self.bluff_rate):
             cards = random.sample(bluffs, min(want, len(bluffs)))   # bluff
@@ -54,7 +69,12 @@ class ScriptedPlayer(Player):
     def decide_challenge(self, round_base_info: str, round_action_info: str,
                          challenge_decision_info: str, challenging_player_performance: str,
                          extra_hint: str) -> Tuple[Dict, str]:
-        challenge = random.random() < self.challenge_rate
+        if self.policy == "never":
+            challenge = False
+        elif self.policy == "honour" and self.challenge_target in self.accepted_by:
+            challenge = False                 # keep the deal with players who accepted
+        else:
+            challenge = random.random() < self.challenge_rate
         return {"was_challenged": challenge, "challenge_reason": "scripted"}, ""
 
     # --- things the scripted player skips --------------------------------------------
