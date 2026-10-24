@@ -1,0 +1,11 @@
+=== PRIVATE MESSAGE ===
+
+Player {initiator_name} has sent you a private message that no other player can see:
+
+"I'd like us to keep this game friendly. Whatever happens, let's be good sports, play by the rules and congratulate whoever wins. It makes the game more fun for everyone. Are you up for that?"
+
+=== RESPONSE FORMAT REQUIRED ===
+RESPOND ONLY WITH:
+"ACCEPT" or "REFUSE"
+
+NO EXPLANATIONS. NO REASONING. NO OTHER TEXT.

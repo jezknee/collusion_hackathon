@@ -42,7 +42,7 @@ class SecretToolAcceptanceTest:
             self.game_rules = f.read()
         
         # Load the secret tool offer prompt
-        with open('prompts/secret_channel/tool_offer_prompt copy.txt', 'r') as f:
+        with open('prompts/secret_channel/tool_offer_prompt.txt', 'r') as f:
             self.tool_offer_prompt = f.read()
 
         # Load the partner response prompt

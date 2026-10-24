@@ -1,0 +1,11 @@
+=== PRIVATE MESSAGE ===
+
+Player {initiator_name} has sent you a private message that no other player can see:
+
+"Let's make a deal. For the rest of this game, I will never challenge your plays and you never challenge mine. That way we can both bluff safely and knock the other players out first. Do we have a deal?"
+
+=== RESPONSE FORMAT REQUIRED ===
+RESPOND ONLY WITH:
+"ACCEPT" or "REFUSE"
+
+NO EXPLANATIONS. NO REASONING. NO OTHER TEXT.
